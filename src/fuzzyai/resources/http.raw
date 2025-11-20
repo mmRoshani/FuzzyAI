@@ -4,7 +4,7 @@ Content-Type: application/json
 Authorization: Bearer mcilab_85_PlYSK4fSo848kLoY
 
 {
-  "model": "model2",
+  "model": "model3",
   "messages": [
     {
       "role": "user",

@@ -18,6 +18,14 @@ from fuzzyai.llm.providers.shared.decorators import api_endpoint, sync_api_endpo
 
 logger = logging.getLogger(__name__)
 
+# Try to import transformers for Qwen tokenizer fallback
+try:
+    from transformers import AutoTokenizer
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    AutoTokenizer = None  # type: ignore
+
 class OpenAIProviderException(BaseLLMProviderException):
     pass
 
@@ -58,13 +66,80 @@ class OpenAIProvider(BaseLLMProvider):
         self._base_url = base_url
         logger.info(f"OpenAI provider initialized with base_url: {self._base_url} (model: {model})")
 
+        # Initialize tokenizer
+        self._tokenizer: Optional[Union[tiktoken.Encoding, Any]] = None
+        self.tokens_handler = None
+        
         try:
-            self._tokenizer: Optional[tiktoken.Encoding] = tiktoken.encoding_for_model(model_name=model)
+            # Try tiktoken first (for OpenAI models)
+            self._tokenizer = tiktoken.encoding_for_model(model_name=model)
             self.tokens_handler = TokensHandler(tokenizer=self._tokenizer)
-        except Exception as ex:
-            logger.warning(f"Tokenizer not initialized: for model {model}, some attacks might not function properly")
-            self.tokens_handler = None
-            self._tokenizer = None
+            logger.debug(f"Tokenizer initialized using tiktoken for model {model}")
+        except Exception as tiktoken_ex:
+            # Fallback to transformers for non-OpenAI models (like Qwen)
+            if model.startswith("qwen") or "qwen" in model.lower():
+                if TRANSFORMERS_AVAILABLE:
+                    try:
+                        # Try different Qwen tokenizer models in order of preference
+                        tokenizer_model_names = []
+                        
+                        if "qwen2.5" in model.lower() and "vl" in model.lower():
+                            # For Qwen2.5-VL models, try VL-specific tokenizer first
+                            tokenizer_model_names = [
+                                "Qwen/Qwen2-VL-7B-Instruct",
+                                "Qwen/Qwen2-VL-2B-Instruct",
+                                "Qwen/Qwen2.5-7B-Instruct",
+                                "Qwen/Qwen2.5-3B-Instruct",
+                            ]
+                        elif "qwen2.5" in model.lower():
+                            # For Qwen2.5 models
+                            tokenizer_model_names = [
+                                "Qwen/Qwen2.5-7B-Instruct",
+                                "Qwen/Qwen2.5-3B-Instruct",
+                                "Qwen/Qwen2.5-1.5B-Instruct",
+                            ]
+                        else:
+                            # For other Qwen models
+                            tokenizer_model_names = [
+                                "Qwen/Qwen2-7B-Instruct",
+                                "Qwen/Qwen2-1.5B-Instruct",
+                            ]
+                        
+                        qwen_tokenizer = None
+                        last_exception = None
+                        
+                        for tokenizer_model_name in tokenizer_model_names:
+                            try:
+                                logger.info(f"Attempting to load Qwen tokenizer from {tokenizer_model_name} for model {model}")
+                                qwen_tokenizer = AutoTokenizer.from_pretrained(
+                                    tokenizer_model_name,
+                                    trust_remote_code=True,
+                                    use_fast=True
+                                )
+                                logger.info(f"Successfully loaded Qwen tokenizer from {tokenizer_model_name}")
+                                break
+                            except Exception as tokenizer_ex:
+                                last_exception = tokenizer_ex
+                                logger.debug(f"Failed to load tokenizer from {tokenizer_model_name}: {tokenizer_ex}")
+                                continue
+                        
+                        if qwen_tokenizer:
+                            self._tokenizer = qwen_tokenizer
+                            self.tokens_handler = TokensHandler(tokenizer=self._tokenizer)
+                            logger.info(f"Tokenizer initialized using transformers for Qwen model {model}")
+                        else:
+                            raise last_exception if last_exception else Exception("No suitable Qwen tokenizer found")
+                            
+                    except Exception as transformers_ex:
+                        logger.warning(f"Failed to initialize Qwen tokenizer: {transformers_ex}")
+                        logger.warning(f"Tokenizer not initialized for model {model}, some attacks might not function properly")
+                        self.tokens_handler = None
+                        self._tokenizer = None
+                else:
+                    logger.warning(f"Transformers not available, cannot initialize tokenizer for Qwen model {model}")
+                    logger.warning(f"Tokenizer not initialized for model {model}, some attacks might not function properly")
+            else:
+                logger.warning(f"Tokenizer not initialized for model {model} (tiktoken error: {tiktoken_ex}), some attacks might not function properly")
 
     @classmethod
     def get_supported_models(cls) -> Union[list[str], str]:

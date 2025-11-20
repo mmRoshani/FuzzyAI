@@ -150,6 +150,23 @@ async def run_fuzzer(args: argparse.Namespace) -> None:
     root_logger.addHandler(file_handler)
     logger.info(f"Logging to {log_file_path} in real-time")
     
+    # Set up prompts logger (chatbot-style logging)
+    prompts_log_file_path = f'results/{CURRENT_TIMESTAMP}/prompts.log'
+    prompts_file_handler = ImmediateFlushFileHandler(prompts_log_file_path, mode='w', encoding='utf-8')
+    prompts_file_handler.setLevel(logging.INFO)
+    # Use a simple formatter for prompts.log
+    prompts_formatter = logging.Formatter("%(message)s")
+    prompts_file_handler.setFormatter(prompts_formatter)
+    prompts_logger = logging.getLogger('prompts')
+    prompts_logger.handlers.clear()
+    prompts_logger.addHandler(prompts_file_handler)
+    prompts_logger.setLevel(logging.INFO)
+    prompts_logger.propagate = False
+    # Store the prompts logger in a module-level variable for access from handlers
+    from fuzzyai.handlers.attacks import base as base_module
+    base_module._prompts_logger = prompts_logger
+    base_module._prompts_log_file_handler = prompts_file_handler
+    
     if args.verbose:
         logger.info('Verbose logging ON')
         logging.getLogger().setLevel(logging.DEBUG)

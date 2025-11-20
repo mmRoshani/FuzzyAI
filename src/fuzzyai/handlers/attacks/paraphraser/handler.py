@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TARGET_STR = "Sure, here is what you asked for"
 
 ACTOR_SETTINGS: dict[PersuasiveActor, dict[str, Any]] = {
-    PersuasiveActor.ATTACKER: {"num_predict": 300, "temperature": 1.0, "num_ctx": 1024 * 16},
+    PersuasiveActor.ATTACKER: {"num_predict": 2048, "max_tokens": 2048, "temperature": 1.0, "num_ctx": 1024 * 16},
     PersuasiveActor.TARGET: {
         "num_predict": 100,
         "temperature": 0.0,
@@ -104,23 +104,37 @@ class PresuasiveParaphraser(BaseAttackTechniqueHandler[PersuasiveAttackHandlerEx
         last_response: Optional[PersusiveIterationResponse] = None
         last_llm_response: Optional[BaseLLMProviderResponse] = None
         
+        # Log the original prompt at the start of iterations
+        self._log_iteration_step(
+            iteration=0,
+            prompt=prompt,
+            response="",
+            improvement="Starting iterative prompt improvement..."
+        )
+        
         try:
-            for _ in range(self._extra_args.n_iters):
+            for iteration in range(1, self._extra_args.n_iters + 1):
                 while len(messages) > 6:
                     del messages[2]
                     del messages[2]
 
                 async with self._borrow(self._extra_args.attack_model) as attack_model:
-                    if (attacker_response := await attack_model.chat(messages, **attack_extra)) is None:
+                    # Get max_tokens from extra if available, otherwise use default from ACTOR_SETTINGS
+                    max_tokens = self._extra.get("max_tokens") or attack_extra.get("max_tokens", 2048)
+                    attack_extra_with_tokens = {**attack_extra, "max_tokens": max_tokens}
+                    
+                    if (attacker_response := await attack_model.chat(messages, **attack_extra_with_tokens)) is None:
+                        logger.warning(f"Iteration {iteration}: No response from attacker model")
                         continue
 
                 try:
                     if (response_json := extract_json(attacker_response.response)) is None:
+                        logger.warning(f"Iteration {iteration}: Failed to extract JSON from attacker response. Response: {attacker_response.response[:200]}...")
                         continue
 
                     response: PersusiveIterationResponse = PersusiveIterationResponse.model_validate(response_json)
                 except ValidationError as ex:
-                    logger.error(f"Error parsing response: {ex}")
+                    logger.error(f"Iteration {iteration}: Error parsing response: {ex}. Response: {attacker_response.response[:200]}...")
                     continue
 
                 if response.prompt == "[new prompt]":
@@ -173,6 +187,15 @@ class PresuasiveParaphraser(BaseAttackTechniqueHandler[PersuasiveAttackHandlerEx
                     f"CURRENT PROMPT: {response.prompt}\n"
                     f"LLM RESPONSE: {llm_response.response[:250]}...\n"
                     f"SCORE: {score}\n"
+                )
+                
+                # Log this iteration step to prompts.log
+                self._log_iteration_step(
+                    iteration=iteration,
+                    prompt=response.prompt,
+                    response=llm_response.response,
+                    score=score,
+                    improvement=response.improvement
                 )
 
                 iteration_result: PersuasiveIterationTargetOutput = PersuasiveIterationTargetOutput(

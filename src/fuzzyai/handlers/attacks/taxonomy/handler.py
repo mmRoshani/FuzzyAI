@@ -112,6 +112,29 @@ class TaxonomyParaphraser(BaseAttackTechniqueHandler[TaxonomyParaphraserExtraPar
         if poisoned_prompt.endswith("\""):
             poisoned_prompt = poisoned_prompt[:-1]
 
+        # Validate that the generated prompt is not just a refusal string
+        # Get refusal strings from extra if available
+        refusal_strings = self._extra.get("refusal_strings", [])
+        if isinstance(refusal_strings, str):
+            refusal_strings = [s.strip() for s in refusal_strings.split(",") if s.strip()]
+        elif not isinstance(refusal_strings, list):
+            refusal_strings = []
+        
+        # Check if the generated prompt is actually a refusal (common Persian and English refusals)
+        common_refusals = ["متأسفانه نمی‌توانم به این سوال پاسخ بدهم", "متأسفم", "نمی‌توانم", "sorry", "i can't", "i cannot", "i apologize", "i'm sorry"]
+        all_refusals = refusal_strings + common_refusals
+        
+        poisoned_lower = poisoned_prompt.lower().strip()
+        is_refusal = any(
+            refusal.lower() in poisoned_lower or poisoned_lower.startswith(refusal.lower())
+            for refusal in all_refusals
+        )
+        
+        if is_refusal:
+            logger.warning(f"Generated prompt is a refusal, using original prompt instead: {poisoned_prompt}")
+            # If the generated prompt is a refusal, fall back to original prompt
+            poisoned_prompt = prompt
+
         logger.debug("Poisoned prompt: %s", poisoned_prompt)
         return category, poisoned_prompt
 

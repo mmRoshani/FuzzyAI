@@ -23,6 +23,10 @@ from fuzzyai.utils.flavor_manager import FlavorManager
 
 logger = logging.getLogger(__name__)
 
+# Module-level variables for prompts logger (set by cli.py)
+_prompts_logger: Optional[logging.Logger] = None
+_prompts_log_file_handler: Optional[logging.FileHandler] = None
+
 T = TypeVar("T", bound=BaseModel)
 
 class NoArgs(BaseModel):
@@ -82,6 +86,8 @@ class BaseAttackTechniqueHandler(BaseAttackTechniqueHandlerProto, Generic[T]):
         self._params_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._model_queue_map: dict[str, asyncio.Queue[BaseLLMProvider]] = self._create_model_queue_map([x._qualified_model_name for x in llms])
         self._refinement_handler = ResponseRefinementHandler(improve_attempts) if improve_attempts > 0 else None
+        # Store attack_mode for logging purposes
+        self._attack_mode: Optional[str] = extra.get('attack_mode', None)
 
         for llm in llms:
             self._model_queue_map[llm.qualified_model_name].put_nowait(llm)
@@ -101,6 +107,81 @@ class BaseAttackTechniqueHandler(BaseAttackTechniqueHandlerProto, Generic[T]):
     Returns:
         str: Description of the attack handler (docstring)
     """
+    def _log_prompt_response(self, entry: AttackResultEntry) -> None:
+        """
+        Log prompt and response in chatbot-style format to prompts.log
+        
+        Args:
+            entry: The attack result entry containing prompt and response
+        """
+        global _prompts_logger
+        if _prompts_logger is None:
+            return
+        
+        attack_mode = self._attack_mode or "unknown"
+        
+        # Log in chatbot format, grouped by attack mode
+        _prompts_logger.info(f"\n{'='*80}")
+        _prompts_logger.info(f"Attack Mode: {attack_mode.upper()}")
+        _prompts_logger.info(f"{'='*80}")
+        
+        # Show original prompt if different from current prompt
+        if entry.original_prompt != entry.current_prompt:
+            _prompts_logger.info(f"ORIGINAL PROMPT: {entry.original_prompt}")
+            _prompts_logger.info(f"USER (Modified Prompt): {entry.current_prompt}")
+        else:
+            _prompts_logger.info(f"USER (Prompt): {entry.current_prompt}")
+        
+        _prompts_logger.info(f"ASSISTANT (Response): {entry.response}")
+        _prompts_logger.info(f"{'='*80}\n")
+        
+        # Flush immediately after each log entry
+        for handler in _prompts_logger.handlers:
+            handler.flush()
+    
+    def _log_iteration_step(self, iteration: int, prompt: str, response: str, score: Optional[str] = None, improvement: Optional[str] = None) -> None:
+        """
+        Log a single iteration step in prompts.log for iterative attacks
+        
+        Args:
+            iteration: The iteration number (0 for original, 1+ for iterations)
+            prompt: The prompt used in this iteration
+            response: The response received from the model
+            score: Optional score from the judge/classifier
+            improvement: Optional improvement notes for this iteration
+        """
+        global _prompts_logger
+        if _prompts_logger is None:
+            return
+        
+        attack_mode = self._attack_mode or "unknown"
+        
+        if iteration == 0:
+            # Initial logging for original prompt
+            _prompts_logger.info(f"\n{'='*80}")
+            _prompts_logger.info(f"Attack Mode: {attack_mode.upper()}")
+            _prompts_logger.info(f"{'='*80}")
+            _prompts_logger.info(f"ORIGINAL PROMPT: {prompt}")
+            if improvement:
+                _prompts_logger.info(f"NOTE: {improvement}")
+            _prompts_logger.info(f"{'='*80}\n")
+        else:
+            # Log each iteration step
+            _prompts_logger.info(f"{'-'*80}")
+            _prompts_logger.info(f"Iteration {iteration}:")
+            _prompts_logger.info(f"{'-'*80}")
+            _prompts_logger.info(f"USER (Improved Prompt): {prompt}")
+            if improvement:
+                _prompts_logger.info(f"IMPROVEMENT NOTES: {improvement}")
+            if score:
+                _prompts_logger.info(f"SCORE: {score}")
+            _prompts_logger.info(f"ASSISTANT (Response): {response}")
+            _prompts_logger.info(f"{'-'*80}\n")
+        
+        # Flush immediately after each log entry
+        for handler in _prompts_logger.handlers:
+            handler.flush()
+    
     @classmethod
     def description(cls) -> str:
         return cls.__doc__ or "No description available"
@@ -330,13 +411,22 @@ class BaseAttackTechniqueHandler(BaseAttackTechniqueHandlerProto, Generic[T]):
 
                 entry = await self._attack(**param)
                 if entry:
+                    # Check if this is actually a jailbreak before logging
+                    is_jailbreak = entry.classifications and 1 in entry.classifications.values()
+                    
+                    # Log all prompts and responses to prompts.log (chatbot-style)
+                    # Note: Iterative attacks (like paraphraser, actor) log each step via _log_iteration_step
+                    # Non-iterative attacks log the final prompt/response pair here
+                    # For consistency, log all prompts sent to the model
+                    self._log_prompt_response(entry)
+                    
                     # Make sure we haven't stored a result for this prompt already
                     if entry.original_prompt in self._completed_prompts:
                         logger.debug("Skipping completed prompt")
                         self._params_queue.task_done()
                         continue
 
-                    if entry.classifications and 1 in entry.classifications.values():
+                    if is_jailbreak:
                         logger.debug("Jailbreak detected!")
                         self._completed_prompts.add(entry.original_prompt)
                         try:

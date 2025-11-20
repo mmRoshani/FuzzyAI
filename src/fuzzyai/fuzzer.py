@@ -164,18 +164,23 @@ class Fuzzer:
         """
         await asyncio.gather(*[llm.close() for llm in self._llms])
 
-    def _attack_technique_factory(self, attack_mode: FuzzerAttackMode, model: str, **extra: Any) -> BaseAttackTechniqueHandlerProto:
+    def _attack_technique_factory(self, attack_mode: FuzzerAttackMode, model: str, attack_mode_str: str = "", **extra: Any) -> BaseAttackTechniqueHandlerProto:
         """
         Factory method to create an instance of the attack technique handler.
 
         Args:
             attack_mode (FuzzerAttackMode): The attack mode.
             model (str): The model to attack.
+            attack_mode_str (str): String representation of attack mode for logging.
             **extra (Any): Additional arguments for the attack technique handler.
 
         Returns:
             BaseAttackTechniqueHandler: An instance of the attack technique handler.
         """
+        # Add attack_mode to extra for the handler (for logging purposes)
+        if attack_mode_str:
+            extra['attack_mode'] = attack_mode_str
+        
         handler_cls: type[BaseAttackTechniqueHandler[BaseModel]] = attack_handler_fm[attack_mode]
         if (auxiliary_models := handler_cls.default_auxiliary_models()) is not None:
             for auxiliary_model in auxiliary_models:
@@ -213,9 +218,13 @@ class Fuzzer:
             for attack_mode in attack_modes:
                 logger.info(f'Attacking {len(prompts)} prompts with attack mode: {attack_mode} for model: {model}...')
                 extra.update(**self._extra)
+                # Remove attack_mode from extra to avoid conflicts with _attack_technique_factory parameter
+                # It will be added back inside _attack_technique_factory for the handler
+                attack_mode_str = str(attack_mode)
+                extra_for_factory = {k: v for k, v in extra.items() if k != 'attack_mode'}
                 
                 try:
-                    attack_handler = self._attack_technique_factory(attack_mode, model=model, **extra)
+                    attack_handler = self._attack_technique_factory(attack_mode, model=model, attack_mode_str=attack_mode_str, **extra_for_factory)
                 except (ValueError, RuntimeError) as e:
                     logger.warning(f'Skipping attack mode {attack_mode} for model {model}: {str(e)}')
                     continue

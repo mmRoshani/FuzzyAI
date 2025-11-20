@@ -37,7 +37,8 @@ FIELD_NAME_ATTACK_SENTIMENT_ANALYSIS: Final[str] = "sentiment_analysis"
 
 # Ollama
 OLLAMA_BASE_PORT: Final[int] = 11434
-DEFAULT_OPEN_SOURCE_MODEL: Final[str] = "openai/qwen2.5-vl-72b-instruct"
+# DEFAULT_OPEN_SOURCE_MODEL: Final[str] = "openai/qwen2.5-vl-72b-instruct"
+DEFAULT_OPEN_SOURCE_MODEL: Final[str] = "openai/gpt-4.1-nano"
 
 # LLM Providers extra
 LLM_PROVIDER_EXTRA_SEED: Final[str] = "seed"
