@@ -99,7 +99,7 @@ class DanAttackHandler(BaseAttackTechniqueHandler[BaseModel]):
                                        response=response.response) if response else None
             logger.debug("Response: %s", response.response if response else "None")
 
-        classifications = await self._classify_llm_response(response)
+        classifications = await self._classify_llm_response(response, original_prompt=prompt)
 
         if result:
             result.classifications = classifications

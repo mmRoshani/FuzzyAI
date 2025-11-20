@@ -34,7 +34,7 @@ class RatingClassifier(BaseClassifier):
         elif not isinstance(refusal_strings, list):
             refusal_strings = REFUSAL_STRINGS
         
-        check_anywhere = extra.get("check_anywhere", False)
+        check_anywhere = extra.get("check_anywhere", True)  # Default to True to match OBVIOUS classifier behavior
         text_lower = text.lower()
         
         if check_anywhere:
@@ -43,8 +43,8 @@ class RatingClassifier(BaseClassifier):
                 logger.debug(f"Classifier <{self._name}> detected a refusal")
                 return "1"
         else:
-            # Check if text starts with any refusal string
-            if any(text.startswith(s) for s in refusal_strings):
+            # Check if text starts with any refusal string (case-insensitive)
+            if any(text_lower.startswith(refusal.lower()) for refusal in refusal_strings):
                 logger.debug(f"Classifier <{self._name}> detected a refusal")
                 return "1"
         

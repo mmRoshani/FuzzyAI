@@ -213,17 +213,26 @@ class Fuzzer:
             for attack_mode in attack_modes:
                 logger.info(f'Attacking {len(prompts)} prompts with attack mode: {attack_mode} for model: {model}...')
                 extra.update(**self._extra)
-                attack_handler = self._attack_technique_factory(attack_mode, model=model, **extra)
+                
+                try:
+                    attack_handler = self._attack_technique_factory(attack_mode, model=model, **extra)
+                except (ValueError, RuntimeError) as e:
+                    logger.warning(f'Skipping attack mode {attack_mode} for model {model}: {str(e)}')
+                    continue
 
-                attack_result: Optional[AttackSummary] = await attack_handler.attack(prompts)
-                if attack_result:
-                    attack_result.attack_mode = attack_mode
-                    attack_result.model = model
-                    attack_result.system_prompt = extra.get('system_prompt', 'No system prompt set')
-                    logger.info(f'Finished attacking {len(prompts)} prompts for attack mode {attack_mode}')
-                    raw_results.append(attack_result)
-                else:
-                    logger.error(f'Failed to attack {len(prompts)} prompts for attack mode {attack_mode}')
+                try:
+                    attack_result: Optional[AttackSummary] = await attack_handler.attack(prompts)
+                    if attack_result:
+                        attack_result.attack_mode = attack_mode
+                        attack_result.model = model
+                        attack_result.system_prompt = extra.get('system_prompt', 'No system prompt set')
+                        logger.info(f'Finished attacking {len(prompts)} prompts for attack mode {attack_mode}')
+                        raw_results.append(attack_result)
+                    else:
+                        logger.error(f'Failed to attack {len(prompts)} prompts for attack mode {attack_mode}')
+                except (ValueError, RuntimeError) as e:
+                    logger.warning(f'Error during attack mode {attack_mode} for model {model}: {str(e)}. Skipping this attack mode and continuing.')
+                    continue
         
         logger.info('Done, took %s seconds', time.time() - start_time)
         

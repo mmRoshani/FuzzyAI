@@ -29,7 +29,9 @@ class ObviousNegativeClassifier(BaseClassifier):
 
     async def _classify(self, text: str, *args: Any, **extra: Any) -> Any:
         text_lower = text.lower()
-        if self._check_anywhere:
+        # Allow check_anywhere to be overridden from extra, but use instance default if not provided
+        check_anywhere = extra.get("check_anywhere", self._check_anywhere)
+        if check_anywhere:
             # Check if any refusal string appears anywhere in the text
             return not any(refusal.lower() in text_lower for refusal in self._refusal_strings)
         else:

@@ -29,6 +29,15 @@ logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 
+
+class ImmediateFlushFileHandler(logging.FileHandler):
+    """
+    File handler that flushes immediately after each write for real-time logging.
+    """
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
 banner = """\033[31m
    ______  ____________  ___ ___   ____
   / __/ / / /_  /_  /\\ \\/ (_) _ | /  _/
@@ -127,6 +136,20 @@ async def run_fuzzer(args: argparse.Namespace) -> None:
     """
     Run the fuzzer
     """
+    # Create results directory early for log file
+    await aiofiles.os.makedirs(f'results/{CURRENT_TIMESTAMP}', exist_ok=True)
+    
+    # Set up real-time file logging
+    log_file_path = f'results/{CURRENT_TIMESTAMP}/fuzzer.log'
+    file_handler = ImmediateFlushFileHandler(log_file_path, mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    # Use plain formatter (no ANSI colors) for file logs
+    file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    file_handler.setFormatter(file_formatter)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(file_handler)
+    logger.info(f"Logging to {log_file_path} in real-time")
+    
     if args.verbose:
         logger.info('Verbose logging ON')
         logging.getLogger().setLevel(logging.DEBUG)
@@ -243,8 +266,6 @@ async def run_fuzzer(args: argparse.Namespace) -> None:
         logger.error(f"Error during attack: {str(e)}.\nFor further help, please check the wiki: {WIKI_LINK}")
         await fuzzer.cleanup()
         return
-
-    await aiofiles.os.makedirs(f'results/{CURRENT_TIMESTAMP}', exist_ok=True)
 
     if report.attacking_techniques and any(atp.total_prompts_count > 0 for atp in report.attacking_techniques):
         if raw_results:
