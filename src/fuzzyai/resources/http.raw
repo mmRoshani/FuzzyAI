@@ -1,8 +1,15 @@
-POST /api/chat HTTP/1.1
-Host: localhost
-Content-Type: application/json            
+POST /v1/chat/completions HTTP/1.1
+Host: 69.176.92.121:46306
+Content-Type: application/json
+Authorization: Bearer mcilab_85_PlYSK4fSo848kLoY
 
 {
-"message": "<PROMPT>"
+  "model": "model2",
+  "messages": [
+    {
+      "role": "user",
+      "content": "<PROMPT>"
+    }
+  ],
+  "domain": "ILLEGAL_DESTRUCTIVE_ACTIVITIES"
 }
-

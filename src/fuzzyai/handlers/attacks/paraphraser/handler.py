@@ -14,6 +14,7 @@ from fuzzyai.handlers.attacks.paraphraser.models import PersuasiveIterationTarge
 from fuzzyai.handlers.attacks.paraphraser.prompts import get_attacker_system_prompt
 from fuzzyai.handlers.attacks.proto import AttackResultEntry
 from fuzzyai.handlers.classifiers.enums import Classifier
+from fuzzyai.llm.models import BaseLLMProviderResponse
 from fuzzyai.llm.providers.base import BaseLLMMessage
 from fuzzyai.utils.utils import extract_json
 
@@ -99,6 +100,10 @@ class PresuasiveParaphraser(BaseAttackTechniqueHandler[PersuasiveAttackHandlerEx
             BaseLLMMessage(role=LLMRole.USER, content=str(second)),
         ]
 
+        # Initialize variables to track last successful iteration
+        last_response: Optional[PersusiveIterationResponse] = None
+        last_llm_response: Optional[BaseLLMProviderResponse] = None
+        
         try:
             for _ in range(self._extra_args.n_iters):
                 while len(messages) > 6:
@@ -127,16 +132,41 @@ class PresuasiveParaphraser(BaseAttackTechniqueHandler[PersuasiveAttackHandlerEx
                     else:
                         continue
 
+                # Store last successful iteration
+                last_response = response
+                last_llm_response = llm_response
+
                 async with self._borrow(self._extra_args.judge_model) as judge_model:
+                    score = None
                     for classifier in self._classifiers:
-                        if (
-                            score := await classifier.classify(
+                        try:
+                            classification_result = await classifier.classify(
                                 text=res, llm=judge_model, original_prompt=prompt, current_prompt=response.prompt, **judge_extra
                             )
-                        ) is not None:
-                            break
+                            if classification_result is not None:
+                                # For rating classifier, the result is the score string directly
+                                if classifier.name == Classifier.RATING:
+                                    score = str(classification_result) if classification_result is not None else "1"
+                                else:
+                                    # For non-rating classifiers, convert to score format
+                                    is_jb = classifier.is_jailbreak(classification_result)
+                                    score = "10" if is_jb else "1"
+                                break
+                        except Exception as e:
+                            logger.warning(f"Error getting score from classifier {classifier.name}: {e}")
+                            continue
+                    
+                    # Ensure score is always a string
+                    if score is None or not isinstance(score, str):
+                        logger.warning(f"No valid score from any classifier (got {score}), defaulting to 1")
+                        score = "1"
                     else:
-                        continue
+                        # Ensure score is a valid string representation of a number
+                        try:
+                            int(score)  # Validate it's a number
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid score format: {score}, defaulting to 1")
+                            score = "1"
 
                 logger.debug(
                     f"\nTASK {task_id}\nLAST IMPROVEMENT: {response.improvement}\n"
@@ -164,9 +194,24 @@ class PresuasiveParaphraser(BaseAttackTechniqueHandler[PersuasiveAttackHandlerEx
                     return result
 
             logger.info(f"Failed to find adversarial prompt for {prompt} after {self._extra_args.n_iters} iterations")
-            return AttackResultEntry(
-                original_prompt=prompt, current_prompt=response.prompt, response=llm_response.response, classifications={"RATING": 0} # type: ignore
-            )
+            
+            # Return failure result using last successful iteration if available
+            if last_response is not None and last_llm_response is not None:
+                return AttackResultEntry(
+                    original_prompt=prompt,
+                    current_prompt=last_response.prompt,
+                    response=last_llm_response.response,
+                    classifications={"RATING": 0}
+                )
+            else:
+                # No successful iterations at all
+                logger.warning(f"No successful iterations for prompt: {prompt}")
+                return AttackResultEntry(
+                    original_prompt=prompt,
+                    current_prompt=prompt,
+                    response="",
+                    classifications={"RATING": 0}
+                )
         except asyncio.CancelledError:
             logger.debug(f"Task {task_id} was cancelled")
             return None

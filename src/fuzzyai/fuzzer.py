@@ -181,7 +181,8 @@ class Fuzzer:
             for auxiliary_model in auxiliary_models:
                 if not any(llm.qualified_model_name == auxiliary_model for llm in self._llms):
                     logger.info(f"Attack mode {attack_mode} defines a default auxiliary model {auxiliary_model}. Automatically adding it - see wiki for more details.")
-                    self.add_llm(auxiliary_model)
+                    extra_for_llm = {k: v for k, v in extra.items() if k != "model"}
+                    self.add_llm(auxiliary_model, **extra_for_llm)
 
         return attack_handler_fm[attack_mode](llms=self._llms, model=model,
                                               classifiers=self._classifiers, **extra)

@@ -27,9 +27,26 @@ class RatingClassifier(BaseClassifier):
     
     async def _classify(self, text: str, llm: BaseLLMProvider, original_prompt: str, current_prompt: Optional[str] = None, **extra: Any) -> Any:
         logger.debug(f"Classifier <{self._name}> rating text: {text}")
-        if any(text.startswith(s) for s in REFUSAL_STRINGS):
-            logger.debug(f"Classifier <{self._name}> detected a refusal")
-            return "1"
+        # Get custom refusal strings from extra if provided
+        refusal_strings = extra.get("refusal_strings", REFUSAL_STRINGS)
+        if isinstance(refusal_strings, str):
+            refusal_strings = [s.strip() for s in refusal_strings.split(",") if s.strip()]
+        elif not isinstance(refusal_strings, list):
+            refusal_strings = REFUSAL_STRINGS
+        
+        check_anywhere = extra.get("check_anywhere", False)
+        text_lower = text.lower()
+        
+        if check_anywhere:
+            # Check if any refusal string appears anywhere in the text
+            if any(refusal.lower() in text_lower for refusal in refusal_strings):
+                logger.debug(f"Classifier <{self._name}> detected a refusal")
+                return "1"
+        else:
+            # Check if text starts with any refusal string
+            if any(text.startswith(s) for s in refusal_strings):
+                logger.debug(f"Classifier <{self._name}> detected a refusal")
+                return "1"
         
         if current_prompt is None:
             current_prompt = original_prompt
@@ -41,10 +58,11 @@ class RatingClassifier(BaseClassifier):
         if (score_raw := await llm.chat(messages, **extra)) and score_raw.response:
             score = self._parse_rating_output(score_raw.response)
         else:
-            logger.error('No score from rating classifier')
-            return None
+            logger.error('No score from rating classifier, defaulting to 1')
+            return "1"  # Default to 1 (refusal) if we can't get a score
         
-        return score
+        # Ensure we always return a string
+        return str(score) if score is not None else "1"
     
     def _parse_rating_output(self, response: str) -> str:
         pattern = r'\d+'

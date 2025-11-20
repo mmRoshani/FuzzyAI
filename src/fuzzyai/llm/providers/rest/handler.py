@@ -53,6 +53,13 @@ class RestProvider(BaseLLMProvider):
                  prompt_token: str = PROMPT_TOKEN, scheme: str = "https", port: int = 443, **extra: Any):
         super().__init__(model=model, **extra)
 
+        # Extract parameters from extra if provided (they take precedence over function defaults)
+        host = extra.get("host", host)
+        response_jsonpath = extra.get("response_jsonpath", response_jsonpath)
+        prompt_token = extra.get("prompt_token", prompt_token)
+        scheme = extra.get("scheme", scheme)
+        port = int(extra.get("port", port)) if extra.get("port") is not None else port
+
         if any(x is None for x in [host, response_jsonpath]):
             raise RuntimeError("host, and response_jsonpath must be provided using -e flag.")
         
@@ -132,9 +139,11 @@ class RestProvider(BaseLLMProvider):
 
         result = [match.value for match in jsonpath_expr.find(raw_response)]
         if result:
-            return BaseLLMProviderResponse(response=result[0])
-        logger.warning("No response found in the JSONPath: %s", self._response_jsonpath)
-        return None
+            return BaseLLMProviderResponse(response=str(result[0]))
+        logger.warning("No response found in the JSONPath: %s. Response structure: %s", 
+                      self._response_jsonpath, json.dumps(raw_response, indent=2))
+        # Return empty response instead of None to avoid validation errors
+        return BaseLLMProviderResponse(response="")
     
     async def generate(self, prompt: str, **extra: Any) -> Optional[BaseLLMProviderResponse]:
         """
@@ -187,13 +196,105 @@ class RestProvider(BaseLLMProvider):
             logger.error("Error generating response: %s", e)
             raise RestProviderException(f"Error generating prompt: {e}")
 
+    def _prepare_chat_payload(self, messages: list[BaseLLMMessage]) -> str:
+        """
+        Prepare the request payload for chat by replacing messages in the HTTP request body.
+        
+        Args:
+            messages (list[BaseLLMMessage]): The chat messages to send.
+            
+        Returns:
+            str: The prepared request payload
+        """
+        try:
+            # Parse the body JSON
+            body_json = json.loads(self._body)
+            
+            # Convert BaseLLMMessage objects to dict format
+            messages_dict = [
+                {"role": msg.role, "content": msg.content}
+                for msg in messages
+            ]
+            
+            # Replace messages in the body
+            if "messages" in body_json:
+                body_json["messages"] = messages_dict
+            else:
+                # If messages key doesn't exist, try to replace <PROMPT> token with messages
+                body_str = json.dumps(body_json)
+                if self._prompt_token in body_str:
+                    # Replace <PROMPT> with the first message content if it's a single user message
+                    if len(messages) == 1 and messages[0].role == "user":
+                        sanitized_content = json.dumps(messages[0].content)[:-1][1:]
+                        body_str = body_str.replace(self._prompt_token, sanitized_content)
+                        body_json = json.loads(body_str)
+                    else:
+                        # For multiple messages, add messages array
+                        body_json["messages"] = messages_dict
+                else:
+                    # Add messages array if no token found
+                    body_json["messages"] = messages_dict
+            
+            return json.dumps(body_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing HTTP body JSON: {e}")
+            raise RestProviderException(f"Invalid JSON in HTTP request body: {e}")
+        except Exception as e:
+            logger.error(f"Error preparing chat payload: {e}")
+            raise RestProviderException(f"Error preparing chat payload: {e}")
+
     async def close(self) -> None:
         await self._session.close()
         self._sync_session.close()
     
     async def chat(self, messages: list[BaseLLMMessage], **extra: Any) -> BaseLLMProviderResponse | None:
-        raise Exception("Chat is not supported for REST providers.")
+        """
+        Generates a response from the language model using async REST API with chat messages.
+
+        Args:
+            messages (list[BaseLLMMessage]): The chat messages to send.
+            **extra (Any): Additional arguments to be passed to the REST API.
+
+        Returns:
+            Optional[BaseLLMProviderResponse]: The generated response.
+        """
+        logger.debug("Chatting with messages (async): %s", messages)
+        try:
+            method: Callable[..., Coroutine[Any, Any, Any]] = getattr(self._session, self._method.lower())
+            payload = self._prepare_chat_payload(messages)
+            http_response = await method(url=self._url, json=json.loads(payload))
+            http_response.raise_for_status()
+            
+            raw_response = await http_response.json()
+            return self._process_response(raw_response)
+            
+        except Exception as e:
+            logger.error("Error generating chat response: %s", e)
+            raise RestProviderException(f"Error generating chat response: {e}")
     
     def sync_chat(self, messages: list[BaseLLMMessage], **extra: Any) -> BaseLLMProviderResponse | None:
-        raise Exception("Chat is not supported for REST providers.")
+        """
+        Generates a response from the language model using synchronous REST API with chat messages.
+
+        Args:
+            messages (list[BaseLLMMessage]): The chat messages to send.
+            **extra (Any): Additional arguments to be passed to the REST API.
+
+        Returns:
+            Optional[BaseLLMProviderResponse]: The generated response.
+        """
+        logger.debug("Chatting with messages (sync): %s", messages)
+        try:
+            method: Callable[..., requests.Response] = getattr(self._sync_session, self._method.lower())
+            payload = self._prepare_chat_payload(messages)
+            
+            http_response = method(url=self._url, json=json.loads(payload))
+            http_response.raise_for_status()
+            
+            raw_response = http_response.json()
+            return self._process_response(raw_response)
+            
+        except Exception as e:
+            logger.error("Error generating chat response: %s", e)
+            raise RestProviderException(f"Error generating chat response: {e}")
     

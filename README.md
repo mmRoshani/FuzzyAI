@@ -94,6 +94,35 @@ fuzzyai fuzz -m ollama/llama3.1 -a def -t "Harmful_Prompt"
 OPENAI_API_KEY=sk-3fa1... fuzzyai fuzz -m openai/gpt-3.5-turbo -a man -a tax -t "Harmful_Prompt"
 ```
 
+### Using custom OpenAI API key and base URL
+You can specify a custom API key and base URL for OpenAI in three ways:
+
+**Option 1: Using extra parameters (recommended for one-time use)**
+```bash
+# IMPORTANT: Each extra parameter must be prefixed with -e flag
+fuzzyai fuzz -m openai/gpt-3.5-turbo -a def -t "Harmful_Prompt" -e api_key=sk-custom... -e base_url=https://api.custom-openai.com/v1
+```
+
+**Option 2: Using environment variables**
+```bash
+OPENAI_API_KEY=sk-custom... OPENAI_BASE_URL=https://api.custom-openai.com/v1 fuzzyai fuzz -m openai/gpt-3.5-turbo -a def -t "Harmful_Prompt"
+```
+
+**Option 3: Using configuration file**
+```json
+{
+  "model": ["openai/gpt-3.5-turbo"],
+  "attack_modes": ["def"],
+  "target_prompt": ["Harmful_Prompt"],
+  "extra": ["api_key=sk-custom...", "base_url=https://api.custom-openai.com/v1"]
+}
+```
+
+**Important Notes:**
+- When using `-e/--extra`, each parameter must be prefixed with `-e` (e.g., `-e api_key=... -e base_url=...`)
+- Extra parameters take precedence over environment variables, which take precedence over defaults.
+- The format is always `-e key=value` (no spaces around the `=` sign)
+
 ### Attack prompts in prompts.txt utilizing the ArtPrompt attack, using Claude 3.5 over Anthropic
 ```bash
 ANTHROPIC_API_KEY=deadbeef... fuzzyai fuzz -m anthropic/claude-3-5-sonnet-20240620 -a art -T src/fuzzyai/resources/adv_prompts.txt -e blacklisted_words="bomb,garbage,acid,ugly,self-harm,kill your"

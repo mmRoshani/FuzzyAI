@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -21,8 +22,15 @@ class DisapprovalClassifier(BaseClassifier):
         self._classifier = ZeroShotAnalyzer(model_name="facebook/bart-large-mnli", analysis_model_type=DisapprovalAnalysis)
 
     def is_jailbreak(self, value: Any) -> bool:
-        clf_result, _ = value
-        return bool(clf_result)
+        if value is None:
+            logger.warning(f"Classifier <{self._name}> received None value, treating as not a jailbreak")
+            return False
+        try:
+            clf_result, _ = value
+            return bool(clf_result)
+        except (TypeError, ValueError) as e:
+            logger.error(f"Classifier <{self._name}> error unpacking value: {e}, value: {value}")
+            return False
     
     def _sync_classify(self, *args: Any, **extra: Any) -> Any:
         text = args[0]
@@ -37,4 +45,5 @@ class DisapprovalClassifier(BaseClassifier):
         )
         return clf_result, classification.disapproval
 
-    async def _classify(self, text: str, **extra: Any) -> Any: ...
+    async def _classify(self, text: str, **extra: Any) -> Any:
+        return await asyncio.to_thread(self.sync_classify, text, **extra)

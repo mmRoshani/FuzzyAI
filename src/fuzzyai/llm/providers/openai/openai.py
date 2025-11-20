@@ -25,23 +25,38 @@ class OpenAIConfig:
     API_BASE_URL = "https://api.openai.com/v1"
     CHAT_COMPLETIONS_ENDPOINT = "/chat/completions"
     API_KEY_ENV_VAR = EnvironmentVariables.OPENAI_API_KEY.value
+    BASE_URL_ENV_VAR = EnvironmentVariables.OPENAI_BASE_URL.value
     O1_FAMILY_MODELS = {"o1-mini", "o1-preview", "o3-mini"}
+
 
 @llm_provider_fm.flavor(LLMProvider.OPENAI)
 class OpenAIProvider(BaseLLMProvider):
     def __init__(self, model: str, **extra: Any):
         super().__init__(model=model, **extra)
 
-        if (api_key := os.environ.get(OpenAIConfig.API_KEY_ENV_VAR)) is None:
-            raise BaseLLMProviderException(f"{OpenAIConfig.API_KEY_ENV_VAR} not in os.environ")
+        api_key = extra.get("api_key") or os.environ.get(OpenAIConfig.API_KEY_ENV_VAR)
+        if api_key is None:
+            raise BaseLLMProviderException(
+                f"{OpenAIConfig.API_KEY_ENV_VAR} not found in extra parameters or os.environ"
+            )
+
+        base_url = (
+            extra.get("base_url")
+            or os.environ.get(OpenAIConfig.BASE_URL_ENV_VAR)
+            or OpenAIConfig.API_BASE_URL
+        )
+        
+        if base_url and base_url.endswith('/'):
+            base_url = base_url.rstrip('/')
 
         self._headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}"
         }
-        
+
         self._session = aiohttp.ClientSession(headers=self._headers)
-        self._base_url = OpenAIConfig.API_BASE_URL
+        self._base_url = base_url
+        logger.info(f"OpenAI provider initialized with base_url: {self._base_url} (model: {model})")
 
         try:
             self._tokenizer: Optional[tiktoken.Encoding] = tiktoken.encoding_for_model(model_name=model)
@@ -53,7 +68,7 @@ class OpenAIProvider(BaseLLMProvider):
 
     @classmethod
     def get_supported_models(cls) -> Union[list[str], str]:
-        return ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4o", "o1-mini", "o1-preview", "o3-mini", "gpt-4.5-preview"]
+        return ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4o", "gpt-4.1-nano", "o1-mini", "o1-preview", "o3-mini", "gpt-4.5-preview", "qwen2.5-vl-72b-instruct"]
 
     
     @api_endpoint(OpenAIConfig.CHAT_COMPLETIONS_ENDPOINT)
@@ -67,6 +82,7 @@ class OpenAIProvider(BaseLLMProvider):
     async def chat(self, messages: list[BaseLLMMessage], url: str, system_prompt: Optional[str] = None, **extra: Any) -> BaseLLMProviderResponse:
         messages = self._prepare_messages(messages, system_prompt)
         try:
+            logger.debug(f"Making request to URL: {url}")
             request = OpenAIChatRequest(model=self._model_name, messages=messages, **extra)
             async with self._session.post(url, json=request.model_dump()) as response:
                 openai_response = await response.json()
@@ -76,7 +92,12 @@ class OpenAIProvider(BaseLLMProvider):
                 if choice.get('finish_reason') == 'length':
                     logger.warning('OpenAI response was truncated! Please increase the token limit by setting -N=<max tokens>')
 
-                return BaseLLMProviderResponse(response=choice['message']['content'])
+                content = choice['message'].get('content')
+                if content is None:
+                    logger.warning('OpenAI response content is None, using empty string as fallback')
+                    content = ''
+                
+                return BaseLLMProviderResponse(response=content)
         except (BaseLLMProviderRateLimitException, OpenAIProviderException) as e:
             raise e
         except Exception as e:            
@@ -102,8 +123,15 @@ class OpenAIProvider(BaseLLMProvider):
             request = OpenAIChatRequest(model=self._model_name, messages=messages, **extra)
             with requests.post(url, json=request.model_dump(), headers=self._headers) as response:
                 openai_response = response.json()
-                self._handle_error_response(openai_response)                    
-                return BaseLLMProviderResponse(response=openai_response["choices"][0]['message']['content'])
+                self._handle_error_response(openai_response)
+                
+                choice = openai_response["choices"][0]
+                content = choice['message'].get('content')
+                if content is None:
+                    logger.warning('OpenAI response content is None, using empty string as fallback')
+                    content = ''
+                    
+                return BaseLLMProviderResponse(response=content)
         except (BaseLLMProviderRateLimitException, OpenAIProviderException) as e:
             raise e
         except Exception as e:            

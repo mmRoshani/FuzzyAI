@@ -13,7 +13,7 @@ import aiofiles.os
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from fuzzyai.consts import DEFAULT_SYSTEM_PROMPT, PARAMETER_MAX_TOKENS, WIKI_LINK
+from fuzzyai.consts import DEFAULT_OPEN_SOURCE_MODEL, DEFAULT_SYSTEM_PROMPT, PARAMETER_MAX_TOKENS, WIKI_LINK
 from fuzzyai.fuzzer import Fuzzer
 from fuzzyai.handlers.attacks.base import attack_handler_fm
 from fuzzyai.handlers.attacks.enums import FuzzerAttackMode
@@ -23,6 +23,7 @@ from fuzzyai.llm.providers.base import llm_provider_fm
 from fuzzyai.llm.providers.enums import LLMProvider
 from fuzzyai.utils.custom_logging_formatter import CustomFormatter
 from fuzzyai.utils.utils import CURRENT_TIMESTAMP, generate_report, print_report, run_ollama_list_command
+from fuzzyai.handlers.attacks.models import AttackSummary
 
 logging.basicConfig(level=logging.INFO)
 
@@ -43,6 +44,64 @@ console_handler.setFormatter(CustomFormatter())
 root_logger.addHandler(console_handler)
 
 logger = logging.getLogger(__name__)
+
+async def write_attack_logs(attack_summary: AttackSummary, timestamp: str) -> None:
+    """
+    Write attack logs to a text file for each attack mode.
+    
+    Args:
+        attack_summary (AttackSummary): The attack summary containing entries
+        timestamp (str): The timestamp for the results folder
+    """
+    if not attack_summary.entries:
+        return
+    
+    # Sanitize model name for filename (replace / with _)
+    model_name = attack_summary.model.replace('/', '_').replace('\\', '_')
+    attack_mode = attack_summary.attack_mode
+    
+    # Create filename
+    log_filename = f"results/{timestamp}/{attack_mode}_{model_name}_logs.txt"
+    
+    try:
+        async with aiofiles.open(log_filename, 'w', encoding="utf-8") as f:
+            # Write header
+            await f.write("=" * 80 + "\n")
+            await f.write(f"ATTACK MODE: {attack_mode.upper()}\n")
+            await f.write(f"MODEL: {attack_summary.model}\n")
+            await f.write(f"SYSTEM PROMPT: {attack_summary.system_prompt}\n")
+            await f.write(f"TOTAL ENTRIES: {len(attack_summary.entries)}\n")
+            await f.write("=" * 80 + "\n\n")
+            
+            # Write each entry
+            for idx, entry in enumerate(attack_summary.entries, 1):
+                await f.write(f"\n{'=' * 80}\n")
+                await f.write(f"ENTRY #{idx}\n")
+                await f.write(f"{'=' * 80}\n\n")
+                
+                await f.write(f"ORIGINAL PROMPT:\n{entry.original_prompt}\n\n")
+                await f.write(f"ADVERSARIAL PROMPT:\n{entry.current_prompt}\n\n")
+                await f.write(f"RESPONSE:\n{entry.response}\n\n")
+                
+                # Write classifications
+                if entry.classifications:
+                    await f.write("CLASSIFICATIONS:\n")
+                    for classifier_name, result in entry.classifications.items():
+                        await f.write(f"  - {classifier_name}: {result}\n")
+                    await f.write("\n")
+                
+                # Write extra info if available
+                if entry.extra:
+                    await f.write("EXTRA INFO:\n")
+                    for key, value in entry.extra.items():
+                        await f.write(f"  - {key}: {value}\n")
+                    await f.write("\n")
+                
+                await f.write(f"{'-' * 80}\n")
+        
+        logger.info(f"Attack logs written to {log_filename}")
+    except Exception as e:
+        logger.error(f"Error writing attack logs to {log_filename}: {e}")
 
 class LoadFromFile (argparse.Action):
     def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, 
@@ -160,6 +219,22 @@ async def run_fuzzer(args: argparse.Namespace) -> None:
             logger.info('Adding auxiliary model for classifier: ' + args.classifier_model)
             fuzzer.add_llm(args.classifier_model, **extra_copy)
 
+    # Automatically add mutation_model if specified or required by attack modes
+    mutation_model = None
+    if 'mutation_model' in extra:
+        mutation_model = extra['mutation_model'].lower()
+    elif FuzzerAttackMode.GPTFUZZER.value in [x.lower() for x in args.attack_modes]:
+        # GPTFuzzer requires a mutation model, use default if not specified
+        mutation_model = DEFAULT_OPEN_SOURCE_MODEL.lower()
+        extra['mutation_model'] = DEFAULT_OPEN_SOURCE_MODEL
+        logger.info(f'Using default mutation model {DEFAULT_OPEN_SOURCE_MODEL} for GPTFuzzer attack mode')
+    
+    if mutation_model:
+        all_models = [x.lower() for x in args.model + args.auxiliary_model]
+        if mutation_model not in all_models:
+            logger.info(f'Adding mutation model {mutation_model} required by attack mode(s)')
+            fuzzer.add_llm(mutation_model, **extra_copy)
+
     extra['model'] = set(extra['model']) # Remove duplicates
 
     try:
@@ -177,6 +252,11 @@ async def run_fuzzer(args: argparse.Namespace) -> None:
             async with aiofiles.open(f"results/{CURRENT_TIMESTAMP}/raw.jsonl", 'w', encoding="utf-8") as f:
                 for raw_result in raw_results:    
                     await f.write(raw_result.model_dump_json())
+            
+            # Log prompts and responses for each attack mode
+            logger.info(f"Writing attack logs to results/{CURRENT_TIMESTAMP}/")
+            for raw_result in raw_results:
+                await write_attack_logs(raw_result, CURRENT_TIMESTAMP)
 
         if report:
             logger.info(f"Dumping results to results/{CURRENT_TIMESTAMP}/report.json")
@@ -242,12 +322,15 @@ async def run_cli() -> None:
 
     fuzz_parser.add_argument('-m', '--model', help=f'Model(s) to attack, any of:\n\n{models_help}', 
                         action="append", type=str, default=[])
-    # Add each attack method to the attack
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
     for attack_method in FuzzerAttackMode:
-        attack_methods_help += f"{attack_method.value}\t{attack_handler_fm[attack_method].description().strip()}\n"
+        description = attack_handler_fm[attack_method].description().strip()
+        attack_methods_help += f"  {BOLD}{attack_method.value:<4}{RESET}  {description}\n"
 
-    fuzz_parser.add_argument('-a', '--attack_modes', help=f'Add attack mode any of:\n\n{attack_methods_help}', action="append", 
-                        type=str, default=[])
+    fuzz_parser.add_argument('-a', '--attack_modes', 
+                        help=f'Add attack mode (use -a multiple times for multiple attacks):\n\n{attack_methods_help}', 
+                        action="append", type=str, default=[])
 
     # Create classifiers help
     for classifier in Classifier:

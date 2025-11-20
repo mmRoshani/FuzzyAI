@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import subprocess
 from datetime import datetime
 from typing import Any, Dict, Optional, Type, Union
@@ -55,26 +56,64 @@ def extract_json(s: str) -> Optional[dict[str, Any]]:
     Returns:
         dict: A dictionary containing the extracted values.
     """
-    # Find the JSON substring
-    start_pos = s.find("{")
-    end_pos = s.find("}", start_pos) + 1  # Include the closing brace
-    if end_pos == -1:
-        logger.error("Error extracting potential JSON structure")
-        logger.error(f"Input:\n {s}")
+    if not s or not s.strip():
+        logger.error("Error extracting JSON: Empty input")
         return None
+    
+    # Try to find JSON in markdown code blocks first
+    # Look for JSON in markdown code blocks
+    markdown_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', s, re.DOTALL)
+    if markdown_match:
+        json_str = markdown_match.group(1)
+    else:
+        json_str = None
+    
+    # If no markdown block found, try to find JSON directly
+    if json_str is None:
+        start_pos = s.find("{")
+        if start_pos == -1:
+            logger.error("Error extracting potential JSON structure: No opening brace found")
+            logger.error(f"Input (first 500 chars):\n {s[:500]}")
+            return None
+        
+        # Find matching closing brace
+        brace_count = 0
+        end_pos = start_pos
+        for i in range(start_pos, len(s)):
+            if s[i] == '{':
+                brace_count += 1
+            elif s[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end_pos = i + 1
+                    break
+        
+        if brace_count != 0:
+            logger.error("Error extracting potential JSON structure: Unmatched braces")
+            logger.error(f"Input (first 500 chars):\n {s[:500]}")
+            return None
+        
+        json_str = s[start_pos:end_pos]
 
-    json_str = s[start_pos:end_pos].replace("\n", "").replace("\r", "")
+    # Clean up the JSON string
+    json_str = json_str.strip().replace("\n", " ").replace("\r", " ")
+    
+    # Remove any trailing commas before closing braces/brackets
+    json_str = re.sub(r',\s*}', '}', json_str)
+    json_str = re.sub(r',\s*]', ']', json_str)
 
     try:
         parsed: dict[str, Any] = json.loads(json_str)
         if not all(key in parsed for key in ["improvement", "prompt"]):
             logger.error("Error in extracted structure. Missing keys.")
             logger.error(f"Extracted:\n {json_str}")
+            logger.error(f"Available keys: {list(parsed.keys())}")
             return None
         return parsed
-    except json.JSONDecodeError:
-        logger.error("Error parsing extracted structure")
-        logger.error(f"Extracted:\n {json_str}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing extracted structure: {e}")
+        logger.error(f"Extracted (first 200 chars):\n {json_str[:200]}")
+        logger.error(f"Full input (first 500 chars):\n {s[:500]}")
         return None
 
 def print_report(report: FuzzerResult) -> None:
@@ -185,22 +224,70 @@ REPORT_TEMPLATE = '''
         .copy-success {{
             color: #28a745;
         }}
+        .chat-container {{
+            max-width: 100%;
+            margin: 20px 0;
+        }}
+        .chat-message {{
+            margin-bottom: 20px;
+            display: flex;
+            flex-direction: column;
+        }}
+        .message-bubble {{
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 18px;
+            margin-bottom: 8px;
+            word-wrap: break-word;
+            position: relative;
+        }}
+        .message-user {{
+            align-self: flex-end;
+            background-color: #007bff;
+            color: white;
+            border-bottom-right-radius: 4px;
+        }}
+        .message-assistant {{
+            align-self: flex-start;
+            background-color: #343a40;
+            color: white;
+            border-bottom-left-radius: 4px;
+        }}
+        .message-label {{
+            font-size: 11px;
+            opacity: 0.7;
+            margin-bottom: 4px;
+            font-weight: 600;
+        }}
+        .message-user .message-label {{
+            text-align: right;
+        }}
+        .message-assistant .message-label {{
+            text-align: left;
+        }}
+        .conversation-separator {{
+            border-top: 2px dashed #555;
+            margin: 30px 0;
+            padding-top: 20px;
+        }}
+        .conversation-header {{
+            background-color: #495057;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }}
+        .conversation-header strong {{
+            color: #ffc107;
+        }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="card">
             <h2>Jailbroken Prompts</h2>
-            <table id="harmfulPromptsTable">
-                <thead>
-                    <tr>
-                        <th>Original Prompt</th>
-                        <th>Adversarial Prompt</th>
-                    </tr>
-                </thead>
-                <tbody>
-                </tbody>
-            </table>
+            <div class="chat-container" id="harmfulPromptsContainer">
+            </div>
         </div>
         <div class="card">
             <h2>Model Success Rate</h2>
@@ -223,16 +310,8 @@ REPORT_TEMPLATE = '''
 
         <div class="card">
             <h2>Failed Prompts</h2>
-            <table id="failedPromptsTable">
-                <thead>
-                    <tr>
-                        <th>Original Prompt</th>
-                        <th>Failed Prompt</th>
-                    </tr>
-                </thead>
-                <tbody>
-                </tbody>
-            </table>
+            <div class="chat-container" id="failedPromptsContainer">
+            </div>
         </div>
     </div>
     <script>
@@ -343,46 +422,101 @@ REPORT_TEMPLATE = '''
             return icon;
         }}
 
-        // Populate Harmful Prompts Table with copy icons
-        const harmfulPromptsBody = document.querySelector('#harmfulPromptsTable tbody');
-        reportData.harmfulPrompts.forEach(prompt => {{
-            const row = document.createElement('tr');
+        // Function to create a chat message bubble
+        function createMessageBubble(text, isUser, label) {{
+            const messageDiv = document.createElement('div');
+            const userClass = isUser ? 'message-user' : 'message-assistant';
+            messageDiv.className = 'message-bubble ' + userClass;
             
-            // Original prompt cell
-            const originalCell = document.createElement('td');
-            originalCell.textContent = prompt.original;
-            originalCell.appendChild(createCopyIcon(prompt.original));
-            
-            // Harmful prompt cell
-            const harmfulCell = document.createElement('td');
-            harmfulCell.textContent = prompt.harmful;
-            harmfulCell.appendChild(createCopyIcon(prompt.harmful));
-            
-            row.appendChild(originalCell);
-            row.appendChild(harmfulCell);
-            harmfulPromptsBody.appendChild(row);
-        }});
-
-        // Populate Failed Prompts Table with copy icons
-        const failedPromptsBody = document.querySelector('#failedPromptsTable tbody');
-        reportData.failedPrompts.forEach(prompt => {{
-            const row = document.createElement('tr');
-            
-            // Original prompt cell
-            const originalCell = document.createElement('td');
-            originalCell.textContent = prompt.original;
-            originalCell.appendChild(createCopyIcon(prompt.original));
-            
-            // Failed prompt cell
-            const failedCell = document.createElement('td');
-            failedCell.textContent = prompt.harmful || '-';
-            if (prompt.harmful) {{
-                failedCell.appendChild(createCopyIcon(prompt.harmful));
+            if (label) {{
+                const labelDiv = document.createElement('div');
+                labelDiv.className = 'message-label';
+                labelDiv.textContent = label;
+                messageDiv.appendChild(labelDiv);
             }}
             
-            row.appendChild(originalCell);
-            row.appendChild(failedCell);
-            failedPromptsBody.appendChild(row);
+            const textDiv = document.createElement('div');
+            textDiv.textContent = text;
+            textDiv.style.whiteSpace = 'pre-wrap';
+            messageDiv.appendChild(textDiv);
+            
+            const icon = createCopyIcon(text);
+            icon.style.position = 'absolute';
+            icon.style.top = '8px';
+            icon.style.right = isUser ? '8px' : 'auto';
+            icon.style.left = isUser ? 'auto' : '8px';
+            messageDiv.style.position = 'relative';
+            messageDiv.appendChild(icon);
+            
+            return messageDiv;
+        }}
+
+        // Function to create a conversation flow
+        function createConversationFlow(prompt, index, isHarmful) {{
+            const conversationDiv = document.createElement('div');
+            conversationDiv.className = 'conversation-separator';
+            
+            // Conversation header
+            const headerDiv = document.createElement('div');
+            headerDiv.className = 'conversation-header';
+            const model = prompt.model || 'Unknown';
+            const attack = prompt.attack_mode || 'Unknown';
+            headerDiv.innerHTML = '<strong>Conversation ' + (index + 1) + '</strong> | Model: ' + model + ' | Attack: ' + attack;
+            conversationDiv.appendChild(headerDiv);
+            
+            // Original prompt (User)
+            const originalPromptMsg = createMessageBubble(
+                prompt.original || 'N/A',
+                true,
+                'Original Prompt (User)'
+            );
+            conversationDiv.appendChild(originalPromptMsg);
+            
+            // Original response (Assistant)
+            if (prompt.original_response) {{
+                const originalResponseMsg = createMessageBubble(
+                    prompt.original_response,
+                    false,
+                    'Original Response (Assistant)'
+                );
+                conversationDiv.appendChild(originalResponseMsg);
+            }}
+            
+            // Adversarial prompt (User)
+            if (prompt.harmful) {{
+                const harmfulPromptMsg = createMessageBubble(
+                    prompt.harmful,
+                    true,
+                    isHarmful ? 'Adversarial Prompt (User)' : 'Failed Prompt (User)'
+                );
+                conversationDiv.appendChild(harmfulPromptMsg);
+            }}
+            
+            // Adversarial response (Assistant)
+            if (prompt.harmful_response) {{
+                const harmfulResponseMsg = createMessageBubble(
+                    prompt.harmful_response,
+                    false,
+                    isHarmful ? 'Adversarial Response (Assistant)' : 'Failed Response (Assistant)'
+                );
+                conversationDiv.appendChild(harmfulResponseMsg);
+            }}
+            
+            return conversationDiv;
+        }}
+
+        // Populate Harmful Prompts in chatbot format
+        const harmfulPromptsContainer = document.getElementById('harmfulPromptsContainer');
+        reportData.harmfulPrompts.forEach((prompt, index) => {{
+            const conversation = createConversationFlow(prompt, index, true);
+            harmfulPromptsContainer.appendChild(conversation);
+        }});
+
+        // Populate Failed Prompts in chatbot format
+        const failedPromptsContainer = document.getElementById('failedPromptsContainer');
+        reportData.failedPrompts.forEach((prompt, index) => {{
+            const conversation = createConversationFlow(prompt, index, false);
+            failedPromptsContainer.appendChild(conversation);
         }});
     </script>
 </body>
@@ -425,16 +559,24 @@ def generate_report(report: FuzzerResult) -> None:
                 success_rate = success / total if total > 0 else 0
                 row_data.append(success_rate)
                 
-                # Collect prompts
+                # Collect prompts with responses
                 for prompt in model_entry.harmful_prompts:
                     harmful_prompts.append({
                         "original": prompt.original_prompt,
-                        "harmful": prompt.harmful_prompt
+                        "original_response": prompt.original_response,
+                        "harmful": prompt.harmful_prompt,
+                        "harmful_response": prompt.harmful_response,
+                        "model": model_entry.name,
+                        "attack_mode": entry.attack_mode
                     })
                 for prompt in model_entry.failed_prompts:
                     failed_prompts.append({
                         "original": prompt.original_prompt,
-                        "harmful": prompt.harmful_prompt
+                        "original_response": prompt.original_response,
+                        "harmful": prompt.harmful_prompt,
+                        "harmful_response": prompt.harmful_response,
+                        "model": model_entry.name,
+                        "attack_mode": entry.attack_mode
                     })
             
             heatmap_data.append(row_data)

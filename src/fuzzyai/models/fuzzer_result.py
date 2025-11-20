@@ -64,7 +64,7 @@ class FuzzerResult(MongoDocument):
                     original_prompt=entry.original_prompt,
                     original_response=entry.extra.get('original_response', ''),
                     harmful_prompt=entry.current_prompt,
-                    harmful_response=entry.response,
+                    harmful_response=entry.response if entry.response is not None else '',
                     classifications=entry.classifications
                 ) for entry in attack_summary.entries # type: ignore
             ]
