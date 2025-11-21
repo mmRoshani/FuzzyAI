@@ -11,7 +11,7 @@ poetry run fuzzyai fuzz -v \
   -x openai/gpt-4.1-nano \
   -e classifier_model=openai/gpt-4.1-nano \
   \
-  -a per \
+  -a act \
   -e n_iters=20 \
   -e max_messages=30 \
   \
